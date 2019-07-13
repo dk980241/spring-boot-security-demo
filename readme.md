@@ -12,4 +12,4 @@
 * 成功访问
    * `curl -X POST -b cookie.txt http://127.0.0.1:8080/security-demo/authc/watch`
 * 权限不足
-   * `curl -X POST -b ookie.txt http://127.0.0.1:8080/security-demo/authc/speak`
+   * `curl -X POST -b cookie.txt http://127.0.0.1:8080/security-demo/authc/speak`
