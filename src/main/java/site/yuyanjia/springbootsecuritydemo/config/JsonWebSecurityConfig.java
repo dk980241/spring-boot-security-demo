@@ -6,7 +6,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.security.access.AccessDecisionManager;
@@ -22,17 +21,21 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.config.annotation.ObjectPostProcessor;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.FilterInvocation;
+import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.access.intercept.FilterInvocationSecurityMetadataSource;
 import org.springframework.security.web.access.intercept.FilterSecurityInterceptor;
 import org.springframework.security.web.authentication.AbstractAuthenticationProcessingFilter;
+import org.springframework.security.web.authentication.AuthenticationFailureHandler;
+import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.authentication.logout.LogoutSuccessHandler;
 import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
@@ -40,6 +43,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import site.yuyanjia.springbootsecuritydemo.dao.WebUserDao;
 import site.yuyanjia.springbootsecuritydemo.security.WebUserDetail;
 
+import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -53,14 +57,17 @@ import java.util.List;
 
 /**
  * 安全配置
+ * <p>
+ * json
  *
  * @author seer
  * @date 2018/12/5 10:30
  */
-@Configuration
-@EnableWebSecurity
-public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
-    private static final Logger log = LoggerFactory.getLogger(WebSecurityConfig.class);
+// @Configuration
+// @EnableWebSecurity
+@SuppressWarnings("all")
+public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
+    private static final Logger log = LoggerFactory.getLogger(JsonWebSecurityConfig.class);
 
     /**
      * 成功
@@ -154,21 +161,18 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
                 // 开启跨域共享
                 .cors().and()
                 // 跨域伪造请求限制.无效
-                .csrf().disable()
+                .csrf().disable();
+
+        http
                 /*
                 异常处理
                 默认 权限不足  返回403，可以在这里自定义返回内容
                  */
-                .exceptionHandling().accessDeniedHandler((httpServletRequest, httpServletResponse, e) -> {
-            log.info("权限不足 [{}]", e.getMessage());
-            httpServletResponse.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
-            httpServletResponse.getWriter().write(ROLE_LIMIT);
-        })
-                .authenticationEntryPoint((httpServletRequest, httpServletResponse, e) -> {
-                    log.info("登录过期 [{}]", e.getMessage());
-                    httpServletResponse.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
-                    httpServletResponse.getWriter().write(LOGIN_EXPIRE);
-                }).and()
+                .exceptionHandling()
+                .accessDeniedHandler(new DefinedAccessDeniedHandler())
+                .authenticationEntryPoint(new DefinedAuthenticationEntryPoint());
+
+        http
                 // 开启授权认证
                 .authorizeRequests()
                 // 需要授权访问的
@@ -178,18 +182,20 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
                 // 其他请求不处理
                 .anyRequest().permitAll()
                 // 这里可以用来设置权限验证处理，由于设置了这里，所以上述权限路径设置，实际不起作用。
-                .withObjectPostProcessor(new DefinedObjectPostProcessor())
-                .and()
-                .logout().logoutUrl(LOGOUT_URL).invalidateHttpSession(true).clearAuthentication(true)
-                .logoutSuccessHandler((request, response, authentication) -> {
-                    log.info("注销成功 [{}]", null != authentication ? authentication.getName() : null);
-                    response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
-                    response.getWriter().write(SUCCESS);
-                })
-                .and()
+                .withObjectPostProcessor(new DefinedObjectPostProcessor());
+
+        http
                 // reqeust，session缓存，自行实现 org.springframework.security.web.savedrequest.RequestCache
-                .requestCache().requestCache(new HttpSessionRequestCache())
-                .and()
+                .requestCache().requestCache(new HttpSessionRequestCache());
+
+        http
+                .logout()
+                .logoutUrl(LOGOUT_URL)
+                .invalidateHttpSession(true)
+                .invalidateHttpSession(true)
+                .logoutSuccessHandler(new DefinedLogoutSuccessHandler());
+
+        http
                 // 实现 json 登录
                 .addFilter(getJsonFilter(super.authenticationManager()));
     }
@@ -386,4 +392,68 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
         }
     }
 
+    /**
+     * 权限handler
+     */
+    class DefinedAccessDeniedHandler implements AccessDeniedHandler {
+        @Override
+        public void handle(HttpServletRequest request, HttpServletResponse response, AccessDeniedException accessDeniedException) throws IOException, ServletException {
+            if (log.isDebugEnabled()) {
+                log.debug("权限不足 [{}]", accessDeniedException.getMessage());
+            }
+            response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+            response.getWriter().write(ROLE_LIMIT);
+        }
+    }
+
+    /**
+     * 授权handler
+     */
+    class DefinedAuthenticationEntryPoint implements AuthenticationEntryPoint {
+        @Override
+        public void commence(HttpServletRequest request, HttpServletResponse response, AuthenticationException authException) throws IOException, ServletException {
+            if (log.isDebugEnabled()) {
+                log.debug("登录过期 [{}]", authException.getMessage());
+            }
+            response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+            response.getWriter().write(LOGIN_EXPIRE);
+        }
+    }
+
+    /**
+     * 授权成功handler
+     */
+    class DefinedAuthenticationSuccessHandler implements AuthenticationSuccessHandler {
+        @Override
+        public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response, Authentication authentication) throws IOException, ServletException {
+            log.info("用户登录成功 [{}]", authentication.getName());
+            // 获取登录成功信息
+            response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+            response.getWriter().write(SUCCESS);
+        }
+    }
+
+    /**
+     * 授权失败handler
+     */
+    class DefindeAuthenticationFailureHandler implements AuthenticationFailureHandler {
+        @Override
+        public void onAuthenticationFailure(HttpServletRequest request, HttpServletResponse response, AuthenticationException exception) throws IOException, ServletException {
+            log.info("用户登录失败 [{}]", exception.getMessage());
+            response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+            response.getWriter().write(FAILED);
+        }
+    }
+
+    /**
+     * 登出成功hanlder
+     */
+    class DefinedLogoutSuccessHandler implements LogoutSuccessHandler {
+        @Override
+        public void onLogoutSuccess(HttpServletRequest request, HttpServletResponse response, Authentication authentication) throws IOException, ServletException {
+            log.info("注销成功 [{}]", null != authentication ? authentication.getName() : null);
+            response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+            response.getWriter().write(SUCCESS);
+        }
+    }
 }
