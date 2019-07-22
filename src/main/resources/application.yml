@@ -2,7 +2,13 @@ server:
   port: 8080
   servlet:
     context-path: /security-demo
+
 spring:
   redis:
     host: 127.0.0.1
     password: admin
+
+logging:
+  level:
+    site.yuyanjia.springbootsecuritydemo: debug
+    org.springframework.security: debug

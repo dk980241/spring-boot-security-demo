@@ -5,6 +5,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.security.access.AccessDecisionManager;
@@ -23,6 +27,7 @@ import org.springframework.security.config.annotation.authentication.builders.Au
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
+import org.springframework.security.config.annotation.web.configurers.RememberMeConfigurer;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.GrantedAuthority;
@@ -36,7 +41,8 @@ import org.springframework.security.web.access.intercept.FilterSecurityIntercept
 import org.springframework.security.web.authentication.AuthenticationFailureHandler;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
 import org.springframework.security.web.authentication.logout.LogoutSuccessHandler;
-import org.springframework.session.security.web.authentication.SpringSessionRememberMeServices;
+import org.springframework.security.web.authentication.rememberme.PersistentRememberMeToken;
+import org.springframework.security.web.authentication.rememberme.PersistentTokenRepository;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -49,7 +55,10 @@ import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 默认安全配置
@@ -102,25 +111,35 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     private static final String AUTH_URL_REG = "/authc/**";
 
     /**
-     * 登录用户名
+     * 登录用户名参数名
      */
     private static final String LOGIN_NAME = "username";
 
     /**
-     * 登录密码
+     * 登录密码参数名
      */
     private static final String LOGIN_PWD = "password";
 
     /**
-     * 记住登录
+     * 记住登录参数名
      */
     private static final String REMEMBER_ME = "rememberMe";
+
+    /**
+     * token有效时间10天
+     * 框架实现 {@link RememberMeConfigurer#tokenValiditySeconds}
+     * 此处使用redis实现
+     */
+    private static final Long TOKEN_VALID_DAYS = 10L;
 
     @Autowired
     private UserDetailsService webUserDetailsService;
 
     @Autowired
     private WebUserDao webUserDao;
+
+    @Autowired
+    private RedisTemplate redisTemplate;
 
     /**
      * cors跨域
@@ -193,10 +212,9 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
         http
                 .rememberMe()
                 .rememberMeParameter(REMEMBER_ME)
-                .rememberMeServices(new SpringSessionRememberMeServices());
+                .tokenRepository(new RedisTokenRepositoryImpl());
 
     }
-
 
     /**
      * 配置登录验证
@@ -235,7 +253,6 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
             }
         });
     }
-
 
     /**
      * 决策管理
@@ -301,7 +318,10 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     }
 
     /**
-     * 数据源
+     * 权限验证数据源
+     * <p>
+     * 此处实现
+     * 从数据库中获取URL对应的role信息
      */
     class DefinedFilterInvocationSecurityMetadataSource implements FilterInvocationSecurityMetadataSource {
         @Override
@@ -323,7 +343,7 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     }
 
     /**
-     * 权限handler
+     * 权限拒绝handler
      */
     class DefinedAccessDeniedHandler implements AccessDeniedHandler {
         @Override
@@ -337,7 +357,8 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     }
 
     /**
-     * 授权handler
+     * 授权入口
+     * 登录过期
      */
     class DefinedAuthenticationEntryPoint implements AuthenticationEntryPoint {
         @Override
@@ -376,7 +397,7 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     }
 
     /**
-     * 登出成功hanlder
+     * 注销成功hanlder
      */
     class DefinedLogoutSuccessHandler implements LogoutSuccessHandler {
         @Override
@@ -384,6 +405,94 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
             log.info("注销成功 [{}]", null != authentication ? authentication.getName() : null);
             response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
             response.getWriter().write(SUCCESS);
+        }
+    }
+
+    /**
+     * redis保存用户token
+     * <p>
+     * remember me
+     * <p>
+     * {@link org.springframework.security.web.authentication.rememberme.InMemoryTokenRepositoryImpl}
+     * {@link org.springframework.security.web.authentication.rememberme.PersistentTokenBasedRememberMeServices}
+     * {@link org.springframework.security.web.authentication.rememberme.PersistentRememberMeToken}
+     * PersistentRememberMeToken 没有实现Serializable，无法进行序列化，自定义存储数据结构
+     */
+    class RedisTokenRepositoryImpl implements PersistentTokenRepository {
+        @Override
+        public void createNewToken(PersistentRememberMeToken token) {
+            if (log.isDebugEnabled()) {
+                log.debug("token create seriesId: [{}]", token.getSeries());
+            }
+            String key = generateKey(token.getSeries());
+            HashMap<String, String> map = new HashMap();
+            map.put("username", token.getUsername());
+            map.put("tokenValue", token.getTokenValue());
+            map.put("date", String.valueOf(token.getDate().getTime()));
+            redisTemplate.opsForHash().putAll(key, map);
+            redisTemplate.expire(key, TOKEN_VALID_DAYS, TimeUnit.DAYS);
+        }
+
+        @Override
+        public void updateToken(String series, String tokenValue, Date lastUsed) {
+            String key = generateKey(series);
+            HashMap<String, String> map = new HashMap();
+            map.put("tokenValue", tokenValue);
+            map.put("date", String.valueOf(lastUsed.getTime()));
+            redisTemplate.opsForHash().putAll(key, map);
+            redisTemplate.expire(key, TOKEN_VALID_DAYS, TimeUnit.DAYS);
+        }
+
+        @Override
+        public PersistentRememberMeToken getTokenForSeries(String seriesId) {
+            String key = generateKey(seriesId);
+            List<String> hashKeys = new ArrayList<>();
+            hashKeys.add("username");
+            hashKeys.add("tokenValue");
+            hashKeys.add("date");
+            List<String> hashValues = redisTemplate.opsForHash().multiGet(key, hashKeys);
+            String username = hashValues.get(0);
+            String tokenValue = hashValues.get(1);
+            String date = hashValues.get(2);
+            if (null == username || null == tokenValue || null == date) {
+                return null;
+            }
+            Long timestamp = Long.valueOf(date);
+            Date time = new Date(timestamp);
+            PersistentRememberMeToken token = new PersistentRememberMeToken(username, seriesId, tokenValue, time);
+            return token;
+        }
+
+        @Override
+        public void removeUserTokens(String username) {
+            if (log.isDebugEnabled()) {
+                log.debug("token remove username: [{}]", username);
+            }
+            byte[] hashKey = redisTemplate.getHashKeySerializer().serialize("username");
+            RedisConnection redisConnection = redisTemplate.getConnectionFactory().getConnection();
+            try (Cursor<byte[]> cursor = redisConnection.scan(ScanOptions.scanOptions().match(generateKey("*")).count(1024).build())) {
+                while (cursor.hasNext()) {
+                    byte[] key = cursor.next();
+                    byte[] hashValue = redisConnection.hGet(key, hashKey);
+                    String storeName = (String) redisTemplate.getHashValueSerializer().deserialize(hashValue);
+                    if (username.equals(storeName)) {
+                        redisConnection.expire(key, 0L);
+                        return;
+                    }
+                }
+            } catch (IOException ex) {
+                log.warn("token remove exception", ex);
+            }
+        }
+
+        /**
+         * 生成key
+         *
+         * @param series
+         * @return
+         */
+        private String generateKey(String series) {
+            return "spring:security:rememberMe:token:" + series;
         }
     }
 }
