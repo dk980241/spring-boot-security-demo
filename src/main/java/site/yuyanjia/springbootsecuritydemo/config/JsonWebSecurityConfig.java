@@ -9,14 +9,17 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.security.access.AccessDecisionManager;
+import org.springframework.security.access.AccessDecisionVoter;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.ConfigAttribute;
 import org.springframework.security.access.SecurityConfig;
+import org.springframework.security.access.vote.AuthenticatedVoter;
+import org.springframework.security.access.vote.RoleVoter;
+import org.springframework.security.access.vote.UnanimousBased;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.AuthenticationServiceException;
 import org.springframework.security.authentication.DisabledException;
-import org.springframework.security.authentication.InsufficientAuthenticationException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.config.annotation.ObjectPostProcessor;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
@@ -29,14 +32,15 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.FilterInvocation;
 import org.springframework.security.web.access.AccessDeniedHandler;
+import org.springframework.security.web.access.expression.WebExpressionVoter;
 import org.springframework.security.web.access.intercept.FilterInvocationSecurityMetadataSource;
 import org.springframework.security.web.access.intercept.FilterSecurityInterceptor;
 import org.springframework.security.web.authentication.AbstractAuthenticationProcessingFilter;
 import org.springframework.security.web.authentication.AuthenticationFailureHandler;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.security.web.authentication.NullRememberMeServices;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.LogoutSuccessHandler;
-import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -51,8 +55,8 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -102,20 +106,15 @@ public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
     /**
      * 授权 URL
      */
-    private static final String AUTH_URL = "/authc/";
+    private static final String AUTH_URL_REG = "/authc/**";
 
     /**
-     * 授权 URL
-     */
-    private static final String AUTH_URL_REG = AUTH_URL + "**";
-
-    /**
-     * 登录用户名
+     * 登录用户名参数名
      */
     private static final String LOGIN_NAME = "username";
 
     /**
-     * 登录密码
+     * 登录密码参数名
      */
     private static final String LOGIN_PWD = "password";
 
@@ -159,7 +158,8 @@ public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
     protected void configure(HttpSecurity http) throws Exception {
         http
                 // 开启跨域共享
-                .cors().and()
+                .cors()
+                .and()
                 // 跨域伪造请求限制.无效
                 .csrf().disable();
 
@@ -173,6 +173,14 @@ public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
                 .authenticationEntryPoint(new DefinedAuthenticationEntryPoint());
 
         http
+                /**
+                 *权限验证配置项
+                 */
+                .authorizeRequests()
+                .accessDecisionManager(accessDecisionManager())
+                .withObjectPostProcessor(new DefindeObjectPostProcessor());
+
+        http
                 // 开启授权认证
                 .authorizeRequests()
                 // 需要授权访问的
@@ -180,13 +188,7 @@ public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
                 // OPTIONS预检请求不处理
                 .antMatchers(HttpMethod.OPTIONS).permitAll()
                 // 其他请求不处理
-                .anyRequest().permitAll()
-                // 这里可以用来设置权限验证处理，由于设置了这里，所以上述权限路径设置，实际不起作用。
-                .withObjectPostProcessor(new DefinedObjectPostProcessor());
-
-        http
-                // reqeust，session缓存，自行实现 org.springframework.security.web.savedrequest.RequestCache
-                .requestCache().requestCache(new HttpSessionRequestCache());
+                .anyRequest().permitAll();
 
         http
                 .logout()
@@ -197,7 +199,9 @@ public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
 
         http
                 // 实现 json 登录
-                .addFilter(getJsonFilter(super.authenticationManager()));
+                .addFilterAt(getJsonFilter(super.authenticationManager()), UsernamePasswordAuthenticationFilter.class);
+
+
     }
 
     /**
@@ -242,6 +246,11 @@ public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
 
     /**
      * 获取json授权filter
+     * <p>
+     * rememberMe的实现需要做大量的自定义代码
+     * {@link org.springframework.security.web.authentication.rememberme.AbstractRememberMeServices#rememberMeRequested}
+     * 在登录过程中将rememberMe的属性放到 attribute 中
+     * 在rememberMeSeriveces 中从 attribute中获取值
      *
      * @return
      */
@@ -249,23 +258,31 @@ public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
         AbstractAuthenticationProcessingFilter filter = new JsonAuthenticationFilter();
 
         // 登录成功后
-        filter.setAuthenticationSuccessHandler((httpServletRequest, httpServletResponse, authentication) -> {
-            log.info("用户登录成功 [{}]", authentication.getName());
-            // 获取登录成功信息
-            httpServletResponse.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
-            httpServletResponse.getWriter().write(SUCCESS);
-        });
+        filter.setAuthenticationSuccessHandler(new DefinedAuthenticationSuccessHandler());
         //登录失败后
-        filter.setAuthenticationFailureHandler((httpServletRequest, httpServletResponse, e) -> {
-            log.info("用户登录失败 [{}]", e.getMessage());
-            httpServletResponse.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
-            httpServletResponse.getWriter().write(FAILED);
-        });
+        filter.setAuthenticationFailureHandler(new DefindeAuthenticationFailureHandler());
         // 作用在登录的URL
         filter.setFilterProcessesUrl(LOGIN_URL);
         // 设置验证manager
         filter.setAuthenticationManager(authenticationManager);
+
+        filter.setRememberMeServices(new NullRememberMeServices());
         return filter;
+    }
+
+    /**
+     * 决策管理
+     *
+     * @return
+     */
+    private AccessDecisionManager accessDecisionManager() {
+        List<AccessDecisionVoter<? extends Object>> decisionVoters = new ArrayList<>();
+        decisionVoters.add(new WebExpressionVoter());
+        decisionVoters.add(new AuthenticatedVoter());
+        decisionVoters.add(new RoleVoter());
+        decisionVoters.add(new UrlRoleVoter());
+        UnanimousBased based = new UnanimousBased(decisionVoters);
+        return based;
     }
 
     /**
@@ -312,83 +329,76 @@ public class JsonWebSecurityConfig extends WebSecurityConfigurerAdapter {
         }
     }
 
-    /**
-     * 权限处理
-     */
-    class DefinedObjectPostProcessor implements ObjectPostProcessor<FilterSecurityInterceptor> {
+    class DefindeObjectPostProcessor implements ObjectPostProcessor<FilterSecurityInterceptor> {
         @Override
         public <O extends FilterSecurityInterceptor> O postProcess(O object) {
-            /*
-               设置权限原数据
-               这里为，请求URL归属哪个角色，最终要用对角色做比较
-             */
-            object.setSecurityMetadataSource(new FilterInvocationSecurityMetadataSource() {
-                @Override
-                public Collection<ConfigAttribute> getAttributes(Object o) throws IllegalArgumentException {
-                    String requestUrl = ((FilterInvocation) o).getRequestUrl();
-                    // 不需要授权路径
-                    if (!requestUrl.startsWith(AUTH_URL)) {
-                        if (log.isDebugEnabled()) {
-                            log.debug("[{}] permit all", requestUrl);
-                        }
-                        return null;
-                    }
-
-                    List<String> roleIds = webUserDao.listRoleByUrl(requestUrl);
-                    return SecurityConfig.createList(roleIds.toArray(new String[0]));
-                }
-
-                @Override
-                public Collection<ConfigAttribute> getAllConfigAttributes() {
-                    return null;
-                }
-
-                @Override
-                public boolean supports(Class<?> aClass) {
-                    return FilterInvocation.class.isAssignableFrom(aClass);
-                }
-            });
-
-            /*
-            设置权限决策者
-            是否有访问权限在这里确定的
-             */
-            object.setAccessDecisionManager(new AccessDecisionManager() {
-                /**
-                 * 判定
-                 *
-                 * @param authentication 登录用户的信息
-                 * @param o
-                 * @param collection   请求地址拥有的角色集合
-                 * @throws AccessDeniedException
-                 * @throws InsufficientAuthenticationException
-                 */
-                @Override
-                public void decide(Authentication authentication, Object o, Collection<ConfigAttribute> collection) throws AccessDeniedException, InsufficientAuthenticationException {
-                    Iterator<ConfigAttribute> iterator = collection.iterator();
-                    while (iterator.hasNext()) {
-                        ConfigAttribute attribute = iterator.next();
-                        Collection<? extends GrantedAuthority> authenticationAuthorities = authentication.getAuthorities();
-                        for (GrantedAuthority authenticationAuthority : authenticationAuthorities) {
-                            if (authenticationAuthority.getAuthority().equalsIgnoreCase(attribute.getAttribute())) {
-                                return;
-                            }
-                        }
-                    }
-                    throw new AccessDeniedException("权限不足");
-                }
-
-                @Override
-                public boolean supports(ConfigAttribute configAttribute) {
-                    return true;
-                }
-
-                @Override
-                public boolean supports(Class<?> aClass) {
-                    return true;
-                }
-            });
+            object.setSecurityMetadataSource(new DefinedFilterInvocationSecurityMetadataSource());
             return object;
+        }
+    }
+
+    /**
+     * {@link org.springframework.security.access.vote.RoleVoter}
+     */
+    class UrlRoleVoter implements AccessDecisionVoter<Object> {
+
+        @Override
+        public boolean supports(ConfigAttribute attribute) {
+            if (null == attribute.getAttribute()) {
+                return false;
+            }
+            return true;
+        }
+
+        @Override
+        public boolean supports(Class<?> clazz) {
+            return true;
+        }
+
+        @Override
+        public int vote(Authentication authentication, Object object, Collection<ConfigAttribute> attributes) {
+            if (null == authentication) {
+                return ACCESS_DENIED;
+            }
+            int result = ACCESS_ABSTAIN;
+            Collection<? extends GrantedAuthority> authorities = authentication.getAuthorities();
+
+            for (ConfigAttribute attribute : attributes) {
+                if (this.supports(attribute)) {
+                    result = ACCESS_DENIED;
+                    for (GrantedAuthority authority : authorities) {
+                        if (attribute.getAttribute().equals(authority.getAuthority())) {
+                            return ACCESS_GRANTED;
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+    }
+
+    /**
+     * 权限验证数据源
+     * <p>
+     * 此处实现
+     * 从数据库中获取URL对应的role信息
+     */
+    class DefinedFilterInvocationSecurityMetadataSource implements FilterInvocationSecurityMetadataSource {
+        @Override
+        public Collection<ConfigAttribute> getAttributes(Object o) throws IllegalArgumentException {
+            String requestUrl = ((FilterInvocation) o).getRequestUrl();
+            List<String> roleIds = webUserDao.listRoleByUrl(requestUrl);
+            return SecurityConfig.createList(roleIds.toArray(new String[0]));
+        }
+
+        @Override
+        public Collection<ConfigAttribute> getAllConfigAttributes() {
+            return null;
+        }
+
+        @Override
+        public boolean supports(Class<?> aClass) {
+            return FilterInvocation.class.isAssignableFrom(aClass);
         }
     }
 
