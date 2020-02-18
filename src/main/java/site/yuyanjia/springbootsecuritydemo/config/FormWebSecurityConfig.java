@@ -11,13 +11,8 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
-import org.springframework.security.access.AccessDecisionManager;
-import org.springframework.security.access.AccessDecisionVoter;
-import org.springframework.security.access.AccessDeniedException;
-import org.springframework.security.access.ConfigAttribute;
-import org.springframework.security.access.SecurityConfig;
-import org.springframework.security.access.vote.AuthenticatedVoter;
-import org.springframework.security.access.vote.RoleVoter;
+import org.springframework.security.access.*;
+import org.springframework.security.access.vote.AffirmativeBased;
 import org.springframework.security.access.vote.UnanimousBased;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.DisabledException;
@@ -53,11 +48,7 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -108,7 +99,12 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     /**
      * 授权 URL
      */
-    private static final String AUTH_URL_REG = "/authc/**";
+    private static final String AUTH_URL = "/autch/";
+
+    /**
+     * 授权 URL 正则
+     */
+    private static final String AUTH_URL_REG = AUTH_URL + "**";
 
     /**
      * 登录用户名参数名
@@ -144,7 +140,7 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     /**
      * cors跨域
      *
-     * @return
+     * @return object
      */
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
@@ -168,8 +164,8 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     /**
      * http安全配置
      *
-     * @param http
-     * @throws Exception
+     * @param http http
+     * @throws Exception exception
      */
     @Override
     protected void configure(HttpSecurity http) throws Exception {
@@ -219,8 +215,8 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
     /**
      * 配置登录验证
      *
-     * @param auth
-     * @throws Exception
+     * @param auth auth
+     * @throws Exception exception
      */
     @Override
     protected void configure(AuthenticationManagerBuilder auth) throws Exception {
@@ -244,7 +240,7 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
             /**
              * 支持使用此方法验证
              *
-             * @param aClass
+             * @param aClass aClass
              * @return 没有特殊处理，返回true，否则不会用这个配置进行验证
              */
             @Override
@@ -256,16 +252,16 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
 
     /**
      * 决策管理
+     * {@link AffirmativeBased} 有一个赞成即可通过
+     * {@link UnanimousBased} 不适用同权限归属多角色场景
      *
-     * @return
+     * @return object
      */
     private AccessDecisionManager accessDecisionManager() {
         List<AccessDecisionVoter<? extends Object>> decisionVoters = new ArrayList<>();
         decisionVoters.add(new WebExpressionVoter());
-        decisionVoters.add(new AuthenticatedVoter());
-        decisionVoters.add(new RoleVoter());
         decisionVoters.add(new UrlRoleVoter());
-        UnanimousBased based = new UnanimousBased(decisionVoters);
+        AffirmativeBased based = new AffirmativeBased(decisionVoters);
         return based;
     }
 
@@ -327,6 +323,10 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
         @Override
         public Collection<ConfigAttribute> getAttributes(Object o) throws IllegalArgumentException {
             String requestUrl = ((FilterInvocation) o).getRequestUrl();
+            // 不需要授权的URL 无需查询归属角色
+            if (!requestUrl.startsWith(AUTH_URL)) {
+                return SecurityConfig.createList();
+            }
             List<String> roleIds = webUserDao.listRoleByUrl(requestUrl);
             return SecurityConfig.createList(roleIds.toArray(new String[0]));
         }
@@ -488,8 +488,8 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
         /**
          * 生成key
          *
-         * @param series
-         * @return
+         * @param series series
+         * @return object
          */
         private String generateKey(String series) {
             return "spring:security:rememberMe:token:" + series;
