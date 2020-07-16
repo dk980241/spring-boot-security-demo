@@ -11,10 +11,15 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
-import org.springframework.security.access.*;
+import org.springframework.security.access.AccessDecisionManager;
+import org.springframework.security.access.AccessDecisionVoter;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.access.ConfigAttribute;
+import org.springframework.security.access.SecurityConfig;
 import org.springframework.security.access.vote.AffirmativeBased;
 import org.springframework.security.access.vote.UnanimousBased;
 import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.AuthenticationServiceException;
 import org.springframework.security.authentication.DisabledException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.config.annotation.ObjectPostProcessor;
@@ -26,6 +31,7 @@ import org.springframework.security.config.annotation.web.configurers.RememberMe
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.FilterInvocation;
@@ -35,36 +41,43 @@ import org.springframework.security.web.access.intercept.FilterInvocationSecurit
 import org.springframework.security.web.access.intercept.FilterSecurityInterceptor;
 import org.springframework.security.web.authentication.AuthenticationFailureHandler;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.LogoutSuccessHandler;
 import org.springframework.security.web.authentication.rememberme.PersistentRememberMeToken;
 import org.springframework.security.web.authentication.rememberme.PersistentTokenRepository;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.OncePerRequestFilter;
 import site.yuyanjia.springbootsecuritydemo.dao.WebUserDao;
 import site.yuyanjia.springbootsecuritydemo.security.WebUserDetail;
 
+import javax.servlet.FilterChain;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 默认安全配置
+ * jwt 安全配置
  * <p>
- * form表单
+ * 基于form表单
  *
  * @author seer
- * @date 2019/7/21 9:30
+ * @date 2020/7/16 10:01
  */
-// @Configuration
-// @EnableWebSecurity
+@Configuration
+@EnableWebSecurity
 @SuppressWarnings("all")
-public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
+public class JwtWebSecurityConfig extends WebSecurityConfigurerAdapter {
 
-    private static final Logger log = LoggerFactory.getLogger(FormWebSecurityConfig.class);
+    private static final Logger log = LoggerFactory.getLogger(JwtWebSecurityConfig.class);
 
     /**
      * 成功
@@ -210,6 +223,10 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
                 .rememberMeParameter(REMEMBER_ME)
                 .tokenRepository(new RedisTokenRepositoryImpl());
 
+        http
+                // 处理用户名获取
+                .addFilterBefore(new JwtAuthenticationTokenFilter(), UsernamePasswordAuthenticationFilter.class);
+
     }
 
     /**
@@ -263,6 +280,31 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
         decisionVoters.add(new UrlRoleVoter());
         AffirmativeBased based = new AffirmativeBased(decisionVoters);
         return based;
+    }
+
+    /**
+     * jwt 拦截器
+     *
+     * @return
+     */
+    class JwtAuthenticationTokenFilter extends OncePerRequestFilter {
+        @Override
+        protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws ServletException, IOException {
+            String authToken = request.getHeader(JwtUtil.HEADER);
+            boolean isJwt = null != authToken;
+            if (isJwt) {
+                if (!JwtUtil.isValid(authToken)) {
+                    throw new AuthenticationServiceException("token 过期");
+                }
+                String username = JwtUtil.getUserName(authToken);
+                if (log.isDebugEnabled()) {
+                    log.debug("jwt username {}", username);
+                }
+                // Authentication authentication = new UsernamePasswordAuthenticationToken(username, "jwt");
+                // SecurityContextHolder.getContext().setAuthentication(authentication);
+            }
+            chain.doFilter(request, response);
+        }
     }
 
     class DefindeObjectPostProcessor implements ObjectPostProcessor<FilterSecurityInterceptor> {
@@ -378,6 +420,9 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
         @Override
         public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response, Authentication authentication) throws IOException, ServletException {
             log.info("用户登录成功 [{}]", authentication.getName());
+            // jwt token
+            String token = JwtUtil.generateToken(authentication.getName());
+            response.setHeader(JwtUtil.HEADER, token);
             // 获取登录成功信息
             response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
             response.getWriter().write(SUCCESS);
@@ -415,7 +460,7 @@ public class FormWebSecurityConfig extends WebSecurityConfigurerAdapter {
      * <p>
      * {@link org.springframework.security.web.authentication.rememberme.InMemoryTokenRepositoryImpl}
      * {@link org.springframework.security.web.authentication.rememberme.PersistentTokenBasedRememberMeServices}
-     * {@link org.springframework.security.web.authentication.rememberme.PersistentRememberMeToken}
+     * {@link PersistentRememberMeToken}
      * PersistentRememberMeToken 没有实现Serializable，无法进行序列化，自定义存储数据结构
      */
     class RedisTokenRepositoryImpl implements PersistentTokenRepository {
