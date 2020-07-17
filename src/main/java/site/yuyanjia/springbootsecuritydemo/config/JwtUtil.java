@@ -68,7 +68,9 @@ public class JwtUtil {
         try {
             expiredDate = parseToken(token).getExpiration();
         } catch (SignatureException e) {
-            log.warn("签名验证失败");
+            if (log.isDebugEnabled()) {
+                log.debug("签名验证失败");
+            }
             return false;
         }
         return expiredDate.after(new Date());

@@ -18,6 +18,7 @@ import org.springframework.security.access.ConfigAttribute;
 import org.springframework.security.access.SecurityConfig;
 import org.springframework.security.access.vote.AffirmativeBased;
 import org.springframework.security.access.vote.UnanimousBased;
+import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.AuthenticationServiceException;
 import org.springframework.security.authentication.DisabledException;
@@ -31,7 +32,6 @@ import org.springframework.security.config.annotation.web.configurers.RememberMe
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.GrantedAuthority;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.FilterInvocation;
@@ -39,20 +39,23 @@ import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.access.expression.WebExpressionVoter;
 import org.springframework.security.web.access.intercept.FilterInvocationSecurityMetadataSource;
 import org.springframework.security.web.access.intercept.FilterSecurityInterceptor;
+import org.springframework.security.web.authentication.AbstractAuthenticationProcessingFilter;
 import org.springframework.security.web.authentication.AuthenticationFailureHandler;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.security.web.authentication.NullRememberMeServices;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.LogoutSuccessHandler;
 import org.springframework.security.web.authentication.rememberme.PersistentRememberMeToken;
 import org.springframework.security.web.authentication.rememberme.PersistentTokenRepository;
+import org.springframework.security.web.context.SecurityContextPersistenceFilter;
+import org.springframework.security.web.session.SessionManagementFilter;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
-import org.springframework.web.filter.OncePerRequestFilter;
 import site.yuyanjia.springbootsecuritydemo.dao.WebUserDao;
 import site.yuyanjia.springbootsecuritydemo.security.WebUserDetail;
 
-import javax.servlet.FilterChain;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -218,15 +221,12 @@ public class JwtWebSecurityConfig extends WebSecurityConfigurerAdapter {
                 .invalidateHttpSession(true)
                 .logoutSuccessHandler(new DefinedLogoutSuccessHandler());
 
+        SecurityContextPersistenceFilter securityContextPersistenceFilter = new SecurityContextPersistenceFilter(new JwtSessionSecurityContextRepository());
         http
-                .rememberMe()
-                .rememberMeParameter(REMEMBER_ME)
-                .tokenRepository(new RedisTokenRepositoryImpl());
+                .addFilterAt(securityContextPersistenceFilter, SecurityContextPersistenceFilter.class);
 
-        http
-                // 处理用户名获取
-                .addFilterBefore(new JwtAuthenticationTokenFilter(), UsernamePasswordAuthenticationFilter.class);
-
+        SessionManagementFilter managementFilter = new SessionManagementFilter(new JwtSessionSecurityContextRepository());
+        http.addFilterAt(managementFilter, SessionManagementFilter.class);
     }
 
     /**
@@ -280,31 +280,6 @@ public class JwtWebSecurityConfig extends WebSecurityConfigurerAdapter {
         decisionVoters.add(new UrlRoleVoter());
         AffirmativeBased based = new AffirmativeBased(decisionVoters);
         return based;
-    }
-
-    /**
-     * jwt 拦截器
-     *
-     * @return
-     */
-    class JwtAuthenticationTokenFilter extends OncePerRequestFilter {
-        @Override
-        protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws ServletException, IOException {
-            String authToken = request.getHeader(JwtUtil.HEADER);
-            boolean isJwt = null != authToken;
-            if (isJwt) {
-                if (!JwtUtil.isValid(authToken)) {
-                    throw new AuthenticationServiceException("token 过期");
-                }
-                String username = JwtUtil.getUserName(authToken);
-                if (log.isDebugEnabled()) {
-                    log.debug("jwt username {}", username);
-                }
-                // Authentication authentication = new UsernamePasswordAuthenticationToken(username, "jwt");
-                // SecurityContextHolder.getContext().setAuthentication(authentication);
-            }
-            chain.doFilter(request, response);
-        }
     }
 
     class DefindeObjectPostProcessor implements ObjectPostProcessor<FilterSecurityInterceptor> {
