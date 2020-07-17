@@ -12,3 +12,5 @@ logging:
   level:
     site.yuyanjia.springbootsecuritydemo: debug
     org.springframework.security: debug
+  pattern:
+    console: "%-5level %logger{50}#%line -%msg%n"

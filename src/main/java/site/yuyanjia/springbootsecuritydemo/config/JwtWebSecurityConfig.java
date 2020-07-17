@@ -5,10 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.connection.RedisConnection;
-import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.security.access.AccessDecisionManager;
@@ -18,9 +15,8 @@ import org.springframework.security.access.ConfigAttribute;
 import org.springframework.security.access.SecurityConfig;
 import org.springframework.security.access.vote.AffirmativeBased;
 import org.springframework.security.access.vote.UnanimousBased;
-import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.AbstractAuthenticationToken;
 import org.springframework.security.authentication.AuthenticationProvider;
-import org.springframework.security.authentication.AuthenticationServiceException;
 import org.springframework.security.authentication.DisabledException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.config.annotation.ObjectPostProcessor;
@@ -32,6 +28,9 @@ import org.springframework.security.config.annotation.web.configurers.RememberMe
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.FilterInvocation;
@@ -39,17 +38,14 @@ import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.access.expression.WebExpressionVoter;
 import org.springframework.security.web.access.intercept.FilterInvocationSecurityMetadataSource;
 import org.springframework.security.web.access.intercept.FilterSecurityInterceptor;
-import org.springframework.security.web.authentication.AbstractAuthenticationProcessingFilter;
 import org.springframework.security.web.authentication.AuthenticationFailureHandler;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
-import org.springframework.security.web.authentication.NullRememberMeServices;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.LogoutSuccessHandler;
-import org.springframework.security.web.authentication.rememberme.PersistentRememberMeToken;
-import org.springframework.security.web.authentication.rememberme.PersistentTokenRepository;
+import org.springframework.security.web.context.HttpRequestResponseHolder;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextPersistenceFilter;
+import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.session.SessionManagementFilter;
-import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -62,10 +58,8 @@ import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Date;
-import java.util.HashMap;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.Set;
 
 /**
  * jwt 安全配置
@@ -179,6 +173,17 @@ public class JwtWebSecurityConfig extends WebSecurityConfigurerAdapter {
 
     /**
      * http安全配置
+     * <p>
+     * 使用原生form表单登录 {@link org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter}
+     * 使用jwt 维护用户状态 {@link JwtSecurityContextRepository}
+     * 登录成功生成jwt {@link DefinedAuthenticationSuccessHandler}
+     * <p>
+     * {@link SecurityContextPersistenceFilter}
+     * {@link SessionManagementFilter}
+     * 默认使用 {@link HttpSessionSecurityContextRepository} 基于session管理用户信息
+     * <p>
+     * jwt不基于服务端状态，
+     * 自定义{@link JwtSecurityContextRepository}维护用户信息
      *
      * @param http http
      * @throws Exception exception
@@ -221,12 +226,10 @@ public class JwtWebSecurityConfig extends WebSecurityConfigurerAdapter {
                 .invalidateHttpSession(true)
                 .logoutSuccessHandler(new DefinedLogoutSuccessHandler());
 
-        SecurityContextPersistenceFilter securityContextPersistenceFilter = new SecurityContextPersistenceFilter(new JwtSessionSecurityContextRepository());
+        // 详见注释
         http
-                .addFilterAt(securityContextPersistenceFilter, SecurityContextPersistenceFilter.class);
-
-        SessionManagementFilter managementFilter = new SessionManagementFilter(new JwtSessionSecurityContextRepository());
-        http.addFilterAt(managementFilter, SessionManagementFilter.class);
+                .addFilterAt(new SecurityContextPersistenceFilter(new JwtSecurityContextRepository()), SecurityContextPersistenceFilter.class)
+                .addFilterAt(new SessionManagementFilter(new JwtSecurityContextRepository()), SessionManagementFilter.class);
     }
 
     /**
@@ -394,9 +397,10 @@ public class JwtWebSecurityConfig extends WebSecurityConfigurerAdapter {
     class DefinedAuthenticationSuccessHandler implements AuthenticationSuccessHandler {
         @Override
         public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response, Authentication authentication) throws IOException, ServletException {
-            log.info("用户登录成功 [{}]", authentication.getName());
+            Collection<? extends GrantedAuthority> roles = authentication.getAuthorities();
             // jwt token
-            String token = JwtUtil.generateToken(authentication.getName());
+            String token = JwtUtil.generateToken(authentication.getName(), roles);
+            log.info("用户登录成功 {} {} {}", authentication.getName(), authentication.getAuthorities(), token);
             response.setHeader(JwtUtil.HEADER, token);
             // 获取登录成功信息
             response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
@@ -429,90 +433,99 @@ public class JwtWebSecurityConfig extends WebSecurityConfigurerAdapter {
     }
 
     /**
-     * redis保存用户token
-     * <p>
-     * remember me
-     * <p>
-     * {@link org.springframework.security.web.authentication.rememberme.InMemoryTokenRepositoryImpl}
-     * {@link org.springframework.security.web.authentication.rememberme.PersistentTokenBasedRememberMeServices}
-     * {@link PersistentRememberMeToken}
-     * PersistentRememberMeToken 没有实现Serializable，无法进行序列化，自定义存储数据结构
+     * JwtSecurityContextRepository
      */
-    class RedisTokenRepositoryImpl implements PersistentTokenRepository {
-        @Override
-        public void createNewToken(PersistentRememberMeToken token) {
-            if (log.isDebugEnabled()) {
-                log.debug("token create seriesId: [{}]", token.getSeries());
-            }
-            String key = generateKey(token.getSeries());
-            HashMap<String, String> map = new HashMap();
-            map.put("username", token.getUsername());
-            map.put("tokenValue", token.getTokenValue());
-            map.put("date", String.valueOf(token.getDate().getTime()));
-            redisTemplate.opsForHash().putAll(key, map);
-            redisTemplate.expire(key, TOKEN_VALID_DAYS, TimeUnit.DAYS);
-        }
+    class JwtSecurityContextRepository implements SecurityContextRepository {
 
         @Override
-        public void updateToken(String series, String tokenValue, Date lastUsed) {
-            String key = generateKey(series);
-            HashMap<String, String> map = new HashMap();
-            map.put("tokenValue", tokenValue);
-            map.put("date", String.valueOf(lastUsed.getTime()));
-            redisTemplate.opsForHash().putAll(key, map);
-            redisTemplate.expire(key, TOKEN_VALID_DAYS, TimeUnit.DAYS);
-        }
-
-        @Override
-        public PersistentRememberMeToken getTokenForSeries(String seriesId) {
-            String key = generateKey(seriesId);
-            List<String> hashKeys = new ArrayList<>();
-            hashKeys.add("username");
-            hashKeys.add("tokenValue");
-            hashKeys.add("date");
-            List<String> hashValues = redisTemplate.opsForHash().multiGet(key, hashKeys);
-            String username = hashValues.get(0);
-            String tokenValue = hashValues.get(1);
-            String date = hashValues.get(2);
-            if (null == username || null == tokenValue || null == date) {
-                return null;
-            }
-            Long timestamp = Long.valueOf(date);
-            Date time = new Date(timestamp);
-            PersistentRememberMeToken token = new PersistentRememberMeToken(username, seriesId, tokenValue, time);
-            return token;
-        }
-
-        @Override
-        public void removeUserTokens(String username) {
-            if (log.isDebugEnabled()) {
-                log.debug("token remove username: [{}]", username);
-            }
-            byte[] hashKey = redisTemplate.getHashKeySerializer().serialize("username");
-            RedisConnection redisConnection = redisTemplate.getConnectionFactory().getConnection();
-            try (Cursor<byte[]> cursor = redisConnection.scan(ScanOptions.scanOptions().match(generateKey("*")).count(1024).build())) {
-                while (cursor.hasNext()) {
-                    byte[] key = cursor.next();
-                    byte[] hashValue = redisConnection.hGet(key, hashKey);
-                    String storeName = (String) redisTemplate.getHashValueSerializer().deserialize(hashValue);
-                    if (username.equals(storeName)) {
-                        redisConnection.expire(key, 0L);
-                        return;
-                    }
+        public SecurityContext loadContext(HttpRequestResponseHolder requestResponseHolder) {
+            HttpServletRequest request = requestResponseHolder.getRequest();
+            String authToken = request.getHeader(JwtUtil.HEADER);
+            if (null == authToken) {
+                if (log.isDebugEnabled()) {
+                    log.debug("No SecurityContext was available, A new one will be created.");
                 }
-            } catch (IOException ex) {
-                log.warn("token remove exception", ex);
+                return SecurityContextHolder.createEmptyContext();
+            }
+
+            if (!JwtUtil.isValid(authToken)) {
+                if (log.isDebugEnabled()) {
+                    log.debug("jwt 无效");
+                }
+                return SecurityContextHolder.createEmptyContext();
+            }
+            String username = JwtUtil.getUserName(authToken);
+            Set<SimpleGrantedAuthority> roleSet = JwtUtil.getRoles(authToken);
+            if (log.isDebugEnabled()) {
+                log.debug("jwt username {} {}", username, roleSet);
+            }
+            SecurityContext securityContext = SecurityContextHolder.createEmptyContext();
+            JwtAuthenticationToken authenticationToken = new JwtAuthenticationToken(username, roleSet);
+            securityContext.setAuthentication(authenticationToken);
+            return securityContext;
+        }
+
+        @Override
+        public void saveContext(SecurityContext context, HttpServletRequest request, HttpServletResponse response) {
+            if (log.isDebugEnabled()) {
+                log.debug("jwt 无需服务端保存状态");
             }
         }
 
         /**
-         * 生成key
+         * Allows the repository to be queried as to whether it contains a security context
+         * for the current request.
          *
-         * @param series series
+         * @param request the current request
+         * @return true if a context is found for the request, false otherwise
+         */
+        @Override
+        public boolean containsContext(HttpServletRequest request) {
+            String authToken = request.getHeader(JwtUtil.HEADER);
+            return null != authToken && !authToken.isEmpty();
+        }
+    }
+
+    /**
+     * JwtAuthenticationToken
+     */
+    class JwtAuthenticationToken extends AbstractAuthenticationToken {
+        private String username;
+
+        /**
+         * init
+         *
+         * @param username    用户名
+         * @param authorities 角色
+         */
+        public JwtAuthenticationToken(String username, Collection<? extends GrantedAuthority> authorities) {
+            super(authorities);
+            this.username = username;
+        }
+
+        /**
+         * jwt 已做验证 {@link JwtUtil#isValid(String)}
+         *
          * @return object
          */
-        private String generateKey(String series) {
-            return "spring:security:rememberMe:token:" + series;
+        @Override
+        public Object getCredentials() {
+            return null;
+        }
+
+        @Override
+        public Object getPrincipal() {
+            return username;
+        }
+
+        /**
+         * jwt 已做验证 {@link JwtUtil#isValid(String)}
+         *
+         * @return true
+         */
+        @Override
+        public boolean isAuthenticated() {
+            return true;
         }
     }
 }

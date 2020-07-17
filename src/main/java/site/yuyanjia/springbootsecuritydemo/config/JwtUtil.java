@@ -6,8 +6,15 @@ import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.SignatureException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * JwtUtil
@@ -46,16 +53,9 @@ public class JwtUtil {
     public final static String HEADER = "Authorization";
 
     /**
-     * 获取用户名
-     *
-     * @param token token
-     * @return object
+     * payload 角色组
      */
-    public static String getUserName(String token) {
-        Claims claims = parseToken(token);
-        return claims.getSubject();
-    }
-
+    public final static String PAYLOAD_ROLES = "roles";
 
     /**
      * token 是否有效
@@ -77,7 +77,41 @@ public class JwtUtil {
     }
 
     /**
+     * 获取用户名
+     *
+     * @param token token
+     * @return object
+     */
+    public static String getUserName(String token) {
+        Claims claims = parseToken(token);
+        return claims.getSubject();
+    }
+
+    /**
+     * 获取角色
+     *
+     * @param token token
+     * @return object
+     */
+    public static Set<SimpleGrantedAuthority> getRoles(String token) {
+        Claims claims = parseToken(token);
+        Object roleObj = claims.get(PAYLOAD_ROLES);
+        if (!(roleObj instanceof List)) {
+            return Collections.emptySet();
+        }
+        List<String> roles = (List<String>) roleObj;
+        Set<SimpleGrantedAuthority> roleSet = new HashSet<>();
+        for (String role : roles) {
+            roleSet.add(new SimpleGrantedAuthority(role));
+        }
+        return roleSet;
+    }
+
+    /**
      * 生成token
+     * <p>
+     * sub: 用户名
+     * roles: 角色数组
      * <p>
      * iss: jwt签发者
      * sub: jwt所面向的用户
@@ -88,15 +122,22 @@ public class JwtUtil {
      * jti: jwt的唯一身份标识，主要用来作为一次性token,从而回避重放攻击
      *
      * @param username username
+     * @param roles    roles
      * @return object
      */
-    public static String generateToken(String username) {
+    public static String generateToken(String username, Collection<? extends GrantedAuthority> roles) {
+        Set<String> roleSet = new HashSet<>();
+        for (GrantedAuthority authority : roles) {
+            roleSet.add(authority.getAuthority());
+        }
+        String[] roleArray = roleSet.toArray(new String[0]);
         Date expireDate = new Date(System.currentTimeMillis() + TOKEN_LIFETIME);
         return Jwts.builder()
                 .setSubject(username)
                 .setIssuedAt(new Date())
                 .setExpiration(expireDate)
                 .signWith(ALGORITHM, SECRET)
+                .claim(PAYLOAD_ROLES, roleArray)
                 .compact();
     }
 
